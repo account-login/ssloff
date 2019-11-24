@@ -14,7 +14,6 @@ type Local struct {
 	// params
 	RemoteAddr string
 	LocalAddr  string
-	NoMITM     bool
 	MITM       *MITM
 	// *peerState
 	pstate atomic.Value
@@ -70,6 +69,7 @@ func (l *Local) clientInitializer(ctx context.Context, conn net.Conn) {
 
 	// read socks5 req
 	// TODO: io deadline
+	// TODO: http proxy
 	reader := bufio.NewReaderSize(conn, kReaderBuf)
 	dstAddr, dstPort, err := socks5handshake(readerWriter{reader, conn})
 	if err != nil {
