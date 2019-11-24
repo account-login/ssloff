@@ -12,9 +12,10 @@ import (
 
 type Local struct {
 	// params
-	RemoteAddr string
-	LocalAddr  string
-	MITM       *MITM
+	RemoteAddr  string
+	LocalAddr   string
+	DialTimeout float64
+	MITM        *MITM
 	// *peerState
 	pstate atomic.Value
 }
@@ -210,7 +211,8 @@ func (l *Local) remoteConnector(ctx context.Context) {
 
 func (l *Local) remoteInitializer(ctx context.Context) {
 	// TODO: io timeout
-	conn, err := net.Dial("tcp", l.RemoteAddr)
+	dialTMO := time.Duration(float64(time.Second) * l.DialTimeout)
+	conn, err := net.DialTimeout("tcp", l.RemoteAddr, dialTMO)
 	if err != nil {
 		ctxlog.Errorf(ctx, "connect remote: %v", err)
 		return

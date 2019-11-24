@@ -23,6 +23,7 @@ func main() {
 	local := ssloff.Local{}
 	flag.StringVar(&local.LocalAddr, "local", "127.0.0.1:1180", "listen on this address")
 	flag.StringVar(&local.RemoteAddr, "remote", "127.0.0.1:2180", "connect to remote")
+	flag.Float64Var(&local.DialTimeout, "dial-timeout", 2.0, "dial timeout to remote")
 	noMITM := flag.Bool("no-mitm", false, "disable MITM")
 	flag.StringVar(&mitm.CAPath, "ca", "ca.pem", "path to CA")
 	flag.StringVar(&mitm.CacheDir, "cert-dir", "", "path to cert cache")
