@@ -17,7 +17,7 @@ type protoMsg struct {
 	// only used by protoParser
 	err error
 	// quene
-	plist SLElement
+	sle SLElement
 }
 
 func (msg *protoMsg) writeTo(w io.Writer) error {

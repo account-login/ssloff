@@ -53,8 +53,9 @@ type leafState struct {
 	readerExit chan struct{}
 	readerDone chan struct{}
 	// writer
-	writerInput chan *protoMsg
-	writerExit  chan struct{}
+	writerInput SList // *protoMsg
+	writerMutex sync.Mutex
+	writerCond  sync.Cond
 	writerDone  chan struct{}
 	// peer writer queue
 	mu      sync.Mutex
@@ -83,12 +84,9 @@ func newLeaf() *leafState {
 	l := &leafState{
 		readerExit: make(chan struct{}, 4),
 		readerDone: make(chan struct{}, 4),
-		// FIXME: possiblely smaller than window
-		// FIXME: too much memory
-		writerInput: make(chan *protoMsg, 1024*1024),
-		writerExit:  make(chan struct{}, 4),
-		writerDone:  make(chan struct{}, 4),
+		writerDone: make(chan struct{}, 4),
 	}
+	l.writerCond.L = &l.writerMutex
 	l.cond.L = &l.mu
 	l.llist.Value = l
 	return l
@@ -156,7 +154,11 @@ func (p *peerState) peerReader(ctx context.Context) {
 			case kCmdData, kCmdEOF:
 				l.leafUpdateAck(ev.ack)
 				// TODO: check for window size
-				l.writerInput <- ev
+				ev.sle.Value = ev
+				l.writerMutex.Lock()
+				l.writerInput.PushBack(&ev.sle)
+				l.writerCond.Signal()
+				l.writerMutex.Unlock()
 			case kCmdClose:
 				l.leafExit()
 			default:
@@ -302,9 +304,9 @@ func (p *peerState) peerWriter(ctx context.Context) {
 }
 
 func (p *peerState) leafExitingInput(msg *protoMsg) {
-	msg.plist.Value = msg
+	msg.sle.Value = msg
 	p.mu.Lock()
-	p.elist.PushBack(&msg.plist)
+	p.elist.PushBack(&msg.sle)
 	p.mu.Unlock()
 	select {
 	case p.writerNotify <- struct{}{}:
@@ -325,13 +327,13 @@ func (p *peerState) peerClose(ctx context.Context) {
 }
 
 func (l *leafState) peerWriterInput(ctx context.Context, msg *protoMsg) {
-	msg.plist.Value = msg
+	msg.sle.Value = msg
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	// enqueue msg
-	l.plist.PushBack(&msg.plist)
+	l.plist.PushBack(&msg.sle)
 	// update state
 	l.fc.snt += uint32(len(msg.data))
 	// notify peer writer
@@ -346,7 +348,14 @@ func (l *leafState) peerWriterInput(ctx context.Context, msg *protoMsg) {
 
 func (l *leafState) leafExit() {
 	l.readerExit <- struct{}{}
-	l.writerExit <- struct{}{}
+
+	ev := &protoMsg{cmd: 0}
+	ev.sle.Value = ev
+	l.writerMutex.Lock()
+	l.writerInput.PushFront(&ev.sle)
+	l.writerCond.Signal()
+	l.writerMutex.Unlock()
+
 	l.mu.Lock()
 	l.exiting = true
 	l.cond.Broadcast()
@@ -401,61 +410,65 @@ func (l *leafState) leafWriter(ctx context.Context) {
 	defer close(l.writerDone)
 
 	for {
-		select {
-		case ev := <-l.writerInput:
-			// do io
-			var err error
-			switch ev.cmd {
-			case kCmdData:
-				// metric
-				if l.metric.FirstWrite == 0 {
-					l.metric.FirstWrite = time.Now().UnixNano() / 1000
-				}
-				l.metric.LastWrite = time.Now().UnixNano() / 1000
-				l.metric.BytesWritten += len(ev.data)
+		l.writerMutex.Lock()
+		for l.writerInput.Empty() {
+			l.writerCond.Wait()
+		}
+		ev := l.writerInput.PopFront().Value.(*protoMsg)
+		l.writerMutex.Unlock()
 
-				ctxlog.Debugf(ctx, "leaf writer got %v bytes", len(ev.data))
-				_, err = l.conn.Write(ev.data)
-			case kCmdEOF:
-				err = l.conn.(interface{ CloseWrite() error }).CloseWrite() // assume tcp
-			default:
-				panic("bad msg cmd")
-			}
-
-			if err != nil {
-				ctxlog.Errorf(ctx, "leaf writer exit with io error: %v", err)
-				l.leafExit()
-				l.peer.leafExitingInput(&protoMsg{cmd: kCmdClose, cid: l.id})
-				return
-			}
-
-			if ev.cmd == kCmdEOF {
-				ctxlog.Infof(ctx, "leaf writer exit with EOF")
-				return
-			}
-
-			if len(ev.data) > 0 {
-				needAck := false
-				l.mu.Lock()
-				// update t.rcv
-				l.fc.rcv += uint32(len(ev.data))
-				ack := l.fc.rcv
-				// send empty data packet to ack peer
-				if l.plist.Empty() {
-					// NOTE: can't call t.peerWriterInput() since we can't block on here
-					needAck = true
-					msg := &protoMsg{cmd: kCmdData, cid: l.id, data: nil}
-					msg.plist.Value = msg
-					l.plist.PushBack(&msg.plist)
-					l.peerNotify(false)
-				}
-				l.mu.Unlock()
-				ctxlog.Debugf(ctx, "peer writer [need_ack:%v][ack:%v]", needAck, ack)
-			}
-		case <-l.writerExit:
+		// do io
+		var err error
+		switch ev.cmd {
+		case 0:
 			ctxlog.Infof(ctx, "peer writer exit with l.writerExit")
 			return
-		} // select
+		case kCmdData:
+			// metric
+			if l.metric.FirstWrite == 0 {
+				l.metric.FirstWrite = time.Now().UnixNano() / 1000
+			}
+			l.metric.LastWrite = time.Now().UnixNano() / 1000
+			l.metric.BytesWritten += len(ev.data)
+
+			ctxlog.Debugf(ctx, "leaf writer got %v bytes", len(ev.data))
+			_, err = l.conn.Write(ev.data)
+		case kCmdEOF:
+			err = l.conn.(interface{ CloseWrite() error }).CloseWrite() // assume tcp
+		default:
+			panic("bad msg cmd")
+		}
+
+		if err != nil {
+			ctxlog.Errorf(ctx, "leaf writer exit with io error: %v", err)
+			l.leafExit()
+			l.peer.leafExitingInput(&protoMsg{cmd: kCmdClose, cid: l.id})
+			return
+		}
+
+		if ev.cmd == kCmdEOF {
+			ctxlog.Infof(ctx, "leaf writer exit with EOF")
+			return
+		}
+
+		if len(ev.data) > 0 {
+			needAck := false
+			l.mu.Lock()
+			// update t.rcv
+			l.fc.rcv += uint32(len(ev.data))
+			ack := l.fc.rcv
+			// send empty data packet to ack peer
+			if l.plist.Empty() {
+				// NOTE: can't call t.peerWriterInput() since we can't block on here
+				needAck = true
+				msg := &protoMsg{cmd: kCmdData, cid: l.id, data: nil}
+				msg.sle.Value = msg
+				l.plist.PushBack(&msg.sle)
+				l.peerNotify(false)
+			}
+			l.mu.Unlock()
+			ctxlog.Debugf(ctx, "peer writer [need_ack:%v][ack:%v]", needAck, ack)
+		}
 	} // for
 }
 

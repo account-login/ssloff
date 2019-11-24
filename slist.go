@@ -32,3 +32,12 @@ func (l *SList) PushBack(t *SLElement) {
 	}
 	l.Tail = t
 }
+
+func (l *SList) PushFront(t *SLElement) {
+	if l.Head == nil {
+		l.Tail = t
+	} else {
+		t.Next = l.Head
+	}
+	l.Head = t
+}
