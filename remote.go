@@ -93,7 +93,7 @@ func createTarget(ctx context.Context, p *peerState, cid uint32) *leafState {
 	l := newLeaf()
 	l.id = cid
 	l.peer = p
-	l.fc.win = 1024 * 1024 // TODO: conf
+	l.fc.win = kDefaultWindow // TODO: conf
 	p.leafStates[cid] = l
 	return l
 }

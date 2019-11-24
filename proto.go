@@ -39,8 +39,10 @@ func (msg *protoMsg) writeTo(w io.Writer) error {
 	return err
 }
 
+const kProtoChannelSize = 128
+
 func protoParser(reader io.Reader) (result chan *protoMsg, quit chan struct{}) {
-	result = make(chan *protoMsg, kChannelSize)
+	result = make(chan *protoMsg, kProtoChannelSize)
 	quit = make(chan struct{})
 
 	go func() {

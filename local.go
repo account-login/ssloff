@@ -188,7 +188,7 @@ func createClient(ctx context.Context, p *peerState) *leafState {
 	l := newLeaf()
 	l.id = p.clientIdSeq
 	l.peer = p
-	l.fc.win = 1024 * 1024 // TODO: config
+	l.fc.win = kDefaultWindow // TODO: config
 	p.leafStates[l.id] = l
 
 	// next id
