@@ -8,12 +8,23 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+type peerMetric struct {
+	Id                int64
+	BytesRead         int64
+	BytesWritten      int64
+	LeavesCreateCount int64
+	LeavesCloseCount  int64
+	Leaves            map[string]leafMetric
+}
 
 type peerState struct {
 	conn      net.Conn
 	onConnect func(ctx context.Context, cid uint32, cmd uint32, dstAddr socksAddr, dstPort uint16)
+	pmetric   peerMetric
 	// reader
 	readerExit chan struct{}
 	readerDone chan struct{}
@@ -40,8 +51,8 @@ type leafMetric struct {
 	LastRead     int64
 	LastWrite    int64
 	Closed       int64
-	BytesRead    int
-	BytesWritten int
+	BytesRead    int64
+	BytesWritten int64
 }
 
 type leafState struct {
@@ -80,7 +91,7 @@ func newPeer() *peerState {
 	}
 }
 
-func newLeaf() *leafState {
+func (p *peerState) newLeaf() *leafState {
 	l := &leafState{
 		readerExit: make(chan struct{}, 4),
 		readerDone: make(chan struct{}, 4),
@@ -89,6 +100,7 @@ func newLeaf() *leafState {
 	l.writerCond.L = &l.writerMutex
 	l.cond.L = &l.mu
 	l.llist.Value = l
+	atomic.AddInt64(&p.pmetric.LeavesCreateCount, 1)
 	return l
 }
 
@@ -159,6 +171,8 @@ func (p *peerState) peerReader(ctx context.Context) {
 				l.writerInput.PushBack(&ev.sle)
 				l.writerCond.Signal()
 				l.writerMutex.Unlock()
+				// metric
+				atomic.AddInt64(&l.peer.pmetric.BytesRead, int64(len(ev.data)))
 			case kCmdClose:
 				l.leafExit()
 			default:
@@ -218,6 +232,9 @@ func (p *peerState) leafConsume(ctx context.Context, l *leafState) error {
 	if err := msg.writeTo(p.conn); err != nil {
 		return err
 	}
+
+	// metric
+	atomic.AddInt64(&l.peer.pmetric.BytesWritten, int64(len(msg.data)))
 
 	// requeue leaf if leaf has more event
 	l.mu.Lock()
@@ -394,7 +411,7 @@ func (l *leafState) leafReader(ctx context.Context) {
 				l.metric.FirstRead = time.Now().UnixNano() / 1000
 			}
 			l.metric.LastRead = time.Now().UnixNano() / 1000
-			l.metric.BytesRead += len(data)
+			atomic.AddInt64(&l.metric.BytesRead, int64(len(data)))
 
 			// send data to peer
 			ctxlog.Debugf(ctx, "leaf reader got %v bytes", len(data))
@@ -429,7 +446,7 @@ func (l *leafState) leafWriter(ctx context.Context) {
 				l.metric.FirstWrite = time.Now().UnixNano() / 1000
 			}
 			l.metric.LastWrite = time.Now().UnixNano() / 1000
-			l.metric.BytesWritten += len(ev.data)
+			atomic.AddInt64(&l.metric.BytesWritten, int64(len(ev.data)))
 
 			ctxlog.Debugf(ctx, "leaf writer got %v bytes", len(ev.data))
 			_, err = l.conn.Write(ev.data)
@@ -476,7 +493,7 @@ func (l *leafState) leafUpdateAck(ack uint32) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if ack != l.fc.ack && ack-l.fc.ack < 1<<31 {
+	if ack != l.fc.ack && ack-l.fc.ack < 1<<31 { // FIXME: 1<<30
 		prevState := l.fc.state()
 		l.fc.ack = ack
 		if prevState == kFlowPause {
@@ -496,8 +513,38 @@ func (l *leafState) leafClose(ctx context.Context) {
 	l.peer.mu.Lock()
 	defer l.peer.mu.Unlock()
 	delete(l.peer.leafStates, l.id)
+	atomic.AddInt64(&l.peer.pmetric.LeavesCloseCount, 1)
 
 	if len(l.peer.leafStates) == 0 {
 		ctxlog.Debugf(ctx, "i am the last leaf")
 	}
+}
+
+func (p *peerState) getMetric() (pm peerMetric) {
+	pm.BytesRead = atomic.LoadInt64(&p.pmetric.BytesRead)
+	pm.BytesWritten = atomic.LoadInt64(&p.pmetric.BytesWritten)
+	pm.LeavesCreateCount = atomic.LoadInt64(&p.pmetric.LeavesCreateCount)
+	pm.LeavesCloseCount = atomic.LoadInt64(&p.pmetric.LeavesCloseCount)
+	pm.Leaves = map[string]leafMetric{}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	i := 0
+	for _, l := range p.leafStates {
+		if atomic.LoadInt64(&l.metric.Created) == 0 {
+			continue
+		}
+
+		lm := leafMetric{}
+		lm.Id = l.metric.Id
+		lm.Leaf = l.metric.Leaf
+		lm.Created = l.metric.Created
+		lm.BytesRead = atomic.LoadInt64(&l.metric.BytesRead)
+		lm.BytesWritten = atomic.LoadInt64(&l.metric.BytesWritten)
+		pm.Leaves[lm.Leaf] = lm
+		i++
+	}
+
+	return
 }

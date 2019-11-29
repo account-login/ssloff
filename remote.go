@@ -6,6 +6,7 @@ import (
 	"gopkg.in/account-login/ctxlog.v2"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -90,7 +91,7 @@ func createTarget(ctx context.Context, p *peerState, cid uint32) *leafState {
 	}
 
 	// create leafState
-	l := newLeaf()
+	l := p.newLeaf()
 	l.id = cid
 	l.peer = p
 	l.fc.win = kDefaultWindow // TODO: conf
@@ -107,7 +108,7 @@ func doConnect(remote *Remote, l *leafState,
 	// metric
 	l.metric.Id = l.id
 	l.metric.Leaf = addr
-	l.metric.Created = time.Now().UnixNano() / 1000
+	atomic.StoreInt64(&l.metric.Created, time.Now().UnixNano()/1000)
 
 	// dial
 	ctx = ctxlog.Pushf(ctx, "[cid:%v][target:%s]", l.id, addr)

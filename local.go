@@ -137,7 +137,7 @@ func (l *Local) clientInitializer(ctx context.Context, conn net.Conn) {
 	}
 	client.metric.Id = client.id
 	client.metric.Leaf = socksAddrString(dstAddr, dstPort)
-	client.metric.Created = acceptedUs
+	atomic.StoreInt64(&client.metric.Created, acceptedUs)
 
 	// connect cmd
 	var cmd uint32 = kCmdConnect
@@ -155,7 +155,7 @@ func (l *Local) clientInitializer(ctx context.Context, conn net.Conn) {
 			cmd: kCmdData, cid: client.id, data: peekData,
 		})
 		client.metric.FirstRead = time.Now().UnixNano() / 1000
-		client.metric.BytesRead += len(peekData)
+		atomic.AddInt64(&client.metric.BytesRead, int64(len(peekData)))
 	}
 
 	// start client io
@@ -185,7 +185,7 @@ func createClient(ctx context.Context, p *peerState) *leafState {
 	}
 
 	// create client
-	l := newLeaf()
+	l := p.newLeaf()
 	l.id = p.clientIdSeq
 	l.peer = p
 	l.fc.win = kDefaultWindow // TODO: config
@@ -231,6 +231,9 @@ func (l *Local) remoteInitializer(ctx context.Context) {
 
 	// store remote
 	l.pstate.Store(p)
+
+	// dbg server
+	dbgServerSetPeer(p)
 
 	// wait remote down
 	<-p.readerDone

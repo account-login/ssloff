@@ -58,9 +58,12 @@ func reader2chan(reader io.Reader) (result chan interface{}, quit chan struct{})
 func StartDebugServer(ctx context.Context, addr string) (server *http.Server) {
 	server = &http.Server{Addr: addr, Handler: nil}
 	go func() {
+		dbgServerStart()
+
 		err := server.ListenAndServe()
 		if err != nil {
 			ctxlog.Errorf(ctx, "StartDebugServer: %v", err)
+			return
 		}
 	}()
 	return
