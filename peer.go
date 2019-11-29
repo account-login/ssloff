@@ -493,7 +493,7 @@ func (l *leafState) leafUpdateAck(ack uint32) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if ack != l.fc.ack && ack-l.fc.ack < 1<<31 { // FIXME: 1<<30
+	if ack != l.fc.ack && ack-l.fc.ack < 1<<30 {
 		prevState := l.fc.state()
 		l.fc.ack = ack
 		if prevState == kFlowPause {
