@@ -13,12 +13,12 @@ import (
 )
 
 type peerMetric struct {
-	Id                int64
+	Peer              string
 	BytesRead         int64
 	BytesWritten      int64
 	LeavesCreateCount int64
 	LeavesCloseCount  int64
-	Leaves            map[string]leafMetric
+	Leaves            map[uint32]leafMetric
 }
 
 type peerState struct {
@@ -43,9 +43,10 @@ type peerState struct {
 
 type leafMetric struct {
 	Id           uint32
-	Leaf         string
+	Leaf         string // FIXME: rename
+	Self         string // FIXME: rename
 	Created      int64
-	Connected    int64
+	Connected    int64 // NOTE: sync
 	FirstWrite   int64
 	FirstRead    int64
 	LastRead     int64
@@ -525,24 +526,26 @@ func (p *peerState) getMetric() (pm peerMetric) {
 	pm.BytesWritten = atomic.LoadInt64(&p.pmetric.BytesWritten)
 	pm.LeavesCreateCount = atomic.LoadInt64(&p.pmetric.LeavesCreateCount)
 	pm.LeavesCloseCount = atomic.LoadInt64(&p.pmetric.LeavesCloseCount)
-	pm.Leaves = map[string]leafMetric{}
+	pm.Leaves = map[uint32]leafMetric{}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	i := 0
 	for _, l := range p.leafStates {
-		if atomic.LoadInt64(&l.metric.Created) == 0 {
+		if atomic.LoadInt64(&l.metric.Connected) == 0 {
 			continue
 		}
 
 		lm := leafMetric{}
 		lm.Id = l.metric.Id
 		lm.Leaf = l.metric.Leaf
+		lm.Self = l.metric.Self
 		lm.Created = l.metric.Created
+		lm.Connected = l.metric.Connected
 		lm.BytesRead = atomic.LoadInt64(&l.metric.BytesRead)
 		lm.BytesWritten = atomic.LoadInt64(&l.metric.BytesWritten)
-		pm.Leaves[lm.Leaf] = lm
+		pm.Leaves[lm.Id] = lm
 		i++
 	}
 

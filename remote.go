@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unsafe"
 )
 
 type Remote struct {
@@ -67,9 +68,15 @@ func (r *Remote) localInitializer(ctx context.Context, conn net.Conn) {
 	go p.peerReader(ctx)
 	go p.peerWriter(ctx)
 
+	// dbg server
+	dbgServerAddPeer(uintptr(unsafe.Pointer(p)), p)
+
 	// wait for reader and writer
 	<-p.readerDone
 	<-p.writerDone
+
+	// dbg server
+	dbgServerDelPeer(uintptr(unsafe.Pointer(p)))
 
 	// clear peer state
 	p.peerClose(ctx)
@@ -108,7 +115,7 @@ func doConnect(remote *Remote, l *leafState,
 	// metric
 	l.metric.Id = l.id
 	l.metric.Leaf = addr
-	atomic.StoreInt64(&l.metric.Created, time.Now().UnixNano()/1000)
+	l.metric.Created = time.Now().UnixNano() / 1000
 
 	// dial
 	ctx = ctxlog.Pushf(ctx, "[cid:%v][target:%s]", l.id, addr)
@@ -118,8 +125,11 @@ func doConnect(remote *Remote, l *leafState,
 		l.peer.leafExitingInput(&protoMsg{cmd: kCmdClose, cid: l.id})
 		return
 	}
-	l.metric.Connected = time.Now().UnixNano() / 1000
 	defer safeClose(ctx, conn) // NOTE: will closing the net.Conn, not tls.Conn
+
+	// metric
+	l.metric.Self = conn.LocalAddr().String()
+	atomic.StoreInt64(&l.metric.Connected, time.Now().UnixNano()/1000)
 
 	// tls
 	if cmd == kCmdConnectSSL {

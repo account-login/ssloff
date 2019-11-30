@@ -11,4 +11,4 @@ const (
 
 const kMsgRecvMaxLen = 512 * 1024
 const kReaderBuf = 128 * 1024
-const kDefaultWindow = 1024 * 1024
+const kDefaultWindow = 1024 * 1024 // less than 1<<30

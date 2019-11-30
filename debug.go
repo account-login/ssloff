@@ -5,22 +5,25 @@ import (
 	"html"
 	"io"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
 type debugServer struct {
+	mu      sync.Mutex
+	peerMap map[uintptr]*debugPeer
+}
+
+type debugPeer struct {
 	mu               sync.Mutex
-	peer             atomic.Value // *peerState
+	peer             *peerState
 	lastPeer         *peerState
 	lastMetric       peerMetric
 	peerBytesRead    lineData
 	peerBytesWritten lineData
-	leafMap          map[string]*leafData
+	leafMap          map[uint32]*leafData
 }
 
 type lineData struct {
@@ -29,16 +32,14 @@ type lineData struct {
 }
 
 type leafData struct {
+	leaf         string
+	self         string
 	bytesRead    lineData
 	bytesWritten lineData
 	skip         int
 }
 
-var globalDbgServer = debugServer{leafMap: map[string]*leafData{}}
-
-func init() {
-	globalDbgServer.peer.Store((*peerState)(nil))
-}
+var globalDbgServer = debugServer{peerMap: map[uintptr]*debugPeer{}}
 
 const kMetricRingBufSize = 3600
 
@@ -200,67 +201,80 @@ func makeSVG(sp *svgParam, data []int64, writer io.Writer) {
 	_, _ = writer.Write([]byte("</svg>\n"))
 }
 
-func dbgServerSetPeer(p *peerState) {
-	globalDbgServer.peer.Store(p)
+func dbgServerAddPeer(key uintptr, p *peerState) {
+	globalDbgServer.mu.Lock()
+	defer globalDbgServer.mu.Unlock()
+	if _, ok := globalDbgServer.peerMap[key]; !ok {
+		globalDbgServer.peerMap[key] = &debugPeer{leafMap: map[uint32]*leafData{}}
+	}
+	globalDbgServer.peerMap[key].peer = p
 }
 
-func collectMetric(s *debugServer) {
-	p := s.peer.Load().(*peerState)
-	if p == nil {
-		return
+func dbgServerDelPeer(key uintptr) {
+	globalDbgServer.mu.Lock()
+	defer globalDbgServer.mu.Unlock()
+	delete(globalDbgServer.peerMap, key)
+}
+
+func collectMetric(dp *debugPeer) {
+	curMetric := dp.peer.getMetric()
+	if dp.peer != dp.lastPeer {
+		// reset metric
+		dp.lastMetric = peerMetric{}
+		dp.leafMap = map[uint32]*leafData{}
 	}
 
-	curMetric := p.getMetric()
-	if p != s.lastPeer {
-		// compare with zero
-		s.lastMetric = peerMetric{}
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	dp.mu.Lock()
+	defer dp.mu.Unlock()
 
 	// peer metric
-	s.peerBytesRead.add(curMetric.BytesRead - s.lastMetric.BytesRead)
-	s.peerBytesWritten.add(curMetric.BytesWritten - s.lastMetric.BytesWritten)
+	dp.peerBytesRead.add(curMetric.BytesRead - dp.lastMetric.BytesRead)
+	dp.peerBytesWritten.add(curMetric.BytesWritten - dp.lastMetric.BytesWritten)
 
 	// leaf metric
 	for _, cur := range curMetric.Leaves {
 		// dest
-		if s.leafMap[cur.Leaf] == nil {
-			s.leafMap[cur.Leaf] = &leafData{}
+		if dp.leafMap[cur.Id] == nil {
+			dp.leafMap[cur.Id] = &leafData{leaf: cur.Leaf, self: cur.Self}
 		}
-		ld := s.leafMap[cur.Leaf]
+		ld := dp.leafMap[cur.Id]
 		// last
-		last := s.lastMetric.Leaves[cur.Leaf]
-		if cur.Id != last.Id {
-			// compare with zero
-			last = leafMetric{}
-		}
+		last := dp.lastMetric.Leaves[cur.Id]
 		// collect
 		ld.bytesRead.add(cur.BytesRead - last.BytesRead)
 		ld.bytesWritten.add(cur.BytesWritten - last.BytesWritten)
 		ld.skip = 0
 	}
 	// clean up expired leaves
-	for key, ld := range s.leafMap {
+	for key, ld := range dp.leafMap {
 		if _, ok := curMetric.Leaves[key]; !ok {
 			ld.bytesRead.add(0)
 			ld.bytesWritten.add(0)
 			ld.skip++
 			if ld.skip >= kMetricRingBufSize {
-				delete(s.leafMap, key)
+				delete(dp.leafMap, key)
 			}
 		}
 	}
+	// TODO: limit dp.leafMap size
 
-	s.lastPeer = p
-	s.lastMetric = curMetric
+	dp.lastPeer = dp.peer
+	dp.lastMetric = curMetric
 }
 
 func dbgServerStart() {
 	go func() {
 		for range time.Tick(1 * time.Second) {
-			collectMetric(&globalDbgServer)
+			globalDbgServer.mu.Lock()
+			dps := make([]*debugPeer, 0, len(globalDbgServer.peerMap))
+			for _, dp := range globalDbgServer.peerMap {
+				dps = append(dps, dp)
+			}
+			globalDbgServer.mu.Unlock()
+
+			for _, dp := range dps {
+				collectMetric(dp)
+			}
 		}
 	}()
 
@@ -276,20 +290,46 @@ func dbgPage(w http.ResponseWriter, r *http.Request) {
 
 	sp := makeSVGParam(param)
 
+	var peerName []string
+	var peerRData [][]int64
+	var peerWData [][]int64
+	var leafRData [][][]int64
+	var leafWData [][][]int64
+	var leafLabels [][]string
+
 	s := &globalDbgServer
 	s.mu.Lock()
-	peerRData := s.peerBytesRead.tail(sp.nbar)
-	peerWData := s.peerBytesWritten.tail(sp.nbar)
-	var leafLabels []string
-	for key := range s.leafMap {
-		leafLabels = append(leafLabels, key)
-	}
-	sort.Strings(leafLabels)
-	var leafRData [][]int64
-	var leafWData [][]int64
-	for _, key := range leafLabels {
-		leafRData = append(leafRData, s.leafMap[key].bytesRead.tail(sp.nbar))
-		leafWData = append(leafWData, s.leafMap[key].bytesWritten.tail(sp.nbar))
+	nPeer := len(s.peerMap)
+	for _, dp := range s.peerMap {
+		dp.mu.Lock()
+
+		peerName = append(peerName, dp.peer.pmetric.Peer)
+		peerRData = append(peerRData, dp.peerBytesRead.tail(sp.nbar))
+		peerWData = append(peerWData, dp.peerBytesWritten.tail(sp.nbar))
+
+		var iLeafIds []uint32
+		var iLeafLabels []string
+		for lid, ld := range dp.leafMap {
+			iLeafIds = append(iLeafIds, lid)
+			label := ld.self + " -> " + ld.leaf
+			if ld.skip > 0 {
+				label = "[dead] " + label
+			}
+			iLeafLabels = append(iLeafLabels, label)
+		}
+		var iLeafRData [][]int64
+		var iLeafWData [][]int64
+		for _, lid := range iLeafIds {
+			iLeafRData = append(iLeafRData, dp.leafMap[lid].bytesRead.tail(sp.nbar))
+			iLeafWData = append(iLeafWData, dp.leafMap[lid].bytesWritten.tail(sp.nbar))
+		}
+		// TODO: sort by leaf labels
+
+		leafLabels = append(leafLabels, iLeafLabels)
+		leafRData = append(leafRData, iLeafRData)
+		leafWData = append(leafWData, iLeafWData)
+
+		dp.mu.Unlock()
 	}
 	s.mu.Unlock()
 
@@ -306,21 +346,24 @@ func dbgPage(w http.ResponseWriter, r *http.Request) {
 				}
 			`)),
 		tag("body",
-			tag("div",
-				tag("div", attr{"id", "peer-bytes-read"},
-					"peer_bytes_read:",
-					tag("div", makeSVGString(sp, peerRData))),
-				tag("div", attr{"id", "peer-bytes-written"},
-					"peer_bytes_written:",
-					tag("div", makeSVGString(sp, peerWData))),
-				rangen(len(leafLabels)*2, func(i int) string {
-					t := [2]string{" bytes_read:", " bytes_written:"}
-					c := [2][][]int64{leafRData, leafWData}
-					return tag("div",
-						leafLabels[i/2], t[i%2],
-						tag("div", makeSVGString(sp, c[i%2][i/2])))
-				}),
-			),
+			rangen(nPeer, func(pi int) string {
+				return tag("div",
+					"peer: ", peerName[pi], " nLeafs: ", fmt.Sprint(len(leafLabels[pi])),
+					tag("div",
+						"peer_bytes_read:",
+						tag("div", makeSVGString(sp, peerRData[pi]))),
+					tag("div",
+						"peer_bytes_written:",
+						tag("div", makeSVGString(sp, peerWData[pi]))),
+					rangen(len(leafLabels[pi])*2, func(li int) string {
+						t := [2]string{" bytes_read:", " bytes_written:"}
+						c := [2][][]int64{leafRData[pi], leafWData[pi]}
+						return tag("div",
+							leafLabels[pi][li/2], t[li%2],
+							tag("div", makeSVGString(sp, c[li%2][li/2])))
+					}),
+				)
+			}),
 		))
 
 	_, _ = w.Write([]byte(`<!DOCTYPE html>`))

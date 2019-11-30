@@ -8,6 +8,7 @@ import (
 	"net"
 	"sync/atomic"
 	"time"
+	"unsafe"
 )
 
 type Local struct {
@@ -137,6 +138,7 @@ func (l *Local) clientInitializer(ctx context.Context, conn net.Conn) {
 	}
 	client.metric.Id = client.id
 	client.metric.Leaf = socksAddrString(dstAddr, dstPort)
+	client.metric.Self = conn.RemoteAddr().String()
 	atomic.StoreInt64(&client.metric.Created, acceptedUs)
 
 	// connect cmd
@@ -222,6 +224,7 @@ func (l *Local) remoteInitializer(ctx context.Context) {
 	ctxlog.Infof(ctx, "[remote:%v] connected from [local:%v]", l.RemoteAddr, conn.LocalAddr())
 
 	p := newPeer()
+	p.pmetric.Peer = conn.RemoteAddr().String()
 	p.conn = conn
 	p.clientIdSeq = 1 // client id starts from 1
 
@@ -233,11 +236,14 @@ func (l *Local) remoteInitializer(ctx context.Context) {
 	l.pstate.Store(p)
 
 	// dbg server
-	dbgServerSetPeer(p)
+	dbgServerAddPeer(uintptr(unsafe.Pointer(l)), p)
 
-	// wait remote down
+	// wait peer down
 	<-p.readerDone
 	<-p.writerDone
+
+	// dbg server
+	dbgServerDelPeer(uintptr(unsafe.Pointer(l)))
 
 	// clear remote state
 	l.pstate.Store((*peerState)(nil))
