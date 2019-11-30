@@ -5,6 +5,7 @@ import (
 	"html"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -180,12 +181,20 @@ func makeSVG(sp *svgParam, data []int64, writer io.Writer) {
 	}
 
 	// y axes
+	factor := 1
+	for len(ticks)/factor*15 >= sp.h {
+		factor++
+	}
 	for i, tval := range ticks {
 		y := int((1 - float64(tval)/float64(upperVal)) * float64(sp.h))
 		if y <= 0 {
 			y = 1
 		} else if y >= sp.h {
 			y = sp.h - 1
+		}
+
+		if i%factor != 0 {
+			continue // avoid overlapping ticks
 		}
 
 		fmt.Fprintf(writer, `<line x1="0" y1="%d" x2="%d" y2="%d" stroke="black" stroke-width="1" stroke-opacity="0.5"/>`,
@@ -289,6 +298,9 @@ func dbgPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sp := makeSVGParam(param)
+	spRW := [2]svgParam{*sp, *sp}
+	spRW[0].fill = "blue"
+	spRW[1].fill = "green"
 
 	var peerName []string
 	var peerRData [][]int64
@@ -333,6 +345,15 @@ func dbgPage(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
+	makeURL := func(key, val string) string {
+		uv := url.Values{}
+		for k, v := range param {
+			uv.Set(k, v)
+		}
+		uv.Set(key, val)
+		return "?" + uv.Encode()
+	}
+
 	refresh := getStr(param, "refresh", "0")
 	doc := tag("html", attr{"lang", "en"},
 		tag("head",
@@ -346,21 +367,40 @@ func dbgPage(w http.ResponseWriter, r *http.Request) {
 				}
 			`)),
 		tag("body",
+			tag("div", "refresh: ",
+				tag("a", attr{"href", makeURL("refresh", "0")}, "NO"), " | ",
+				tag("a", attr{"href", makeURL("refresh", "1")}, "1s"), " | ",
+				tag("a", attr{"href", makeURL("refresh", "2")}, "2s"), " | ",
+				tag("a", attr{"href", makeURL("refresh", "5")}, "5s"), " | ",
+			),
+			tag("div", "width: ",
+				tag("a", attr{"href", makeURL("width", "200")}, "200"), " | ",
+				tag("a", attr{"href", makeURL("width", "400")}, "400"), " | ",
+				tag("a", attr{"href", makeURL("width", "800")}, "800"), " | ",
+				tag("a", attr{"href", makeURL("width", "1200")}, "1200"), " | ",
+			),
+			tag("div", "height: ",
+				tag("a", attr{"href", makeURL("height", "30")}, "30"), " | ",
+				tag("a", attr{"href", makeURL("height", "60")}, "&nbsp;", "60"), " | ",
+				tag("a", attr{"href", makeURL("height", "100")}, "100"), " | ",
+				tag("a", attr{"href", makeURL("height", "200")}, "200"), " | ",
+			),
+			tag("br", nil),
 			rangen(nPeer, func(pi int) string {
 				return tag("div",
 					"peer: ", peerName[pi], " nLeafs: ", fmt.Sprint(len(leafLabels[pi])),
 					tag("div",
 						"peer_bytes_read:",
-						tag("div", makeSVGString(sp, peerRData[pi]))),
+						tag("div", makeSVGString(&spRW[0], peerRData[pi]))),
 					tag("div",
 						"peer_bytes_written:",
-						tag("div", makeSVGString(sp, peerWData[pi]))),
+						tag("div", makeSVGString(&spRW[1], peerWData[pi]))),
 					rangen(len(leafLabels[pi])*2, func(li int) string {
 						t := [2]string{" bytes_read:", " bytes_written:"}
 						c := [2][][]int64{leafRData[pi], leafWData[pi]}
 						return tag("div",
 							leafLabels[pi][li/2], t[li%2],
-							tag("div", makeSVGString(sp, c[li%2][li/2])))
+							tag("div", makeSVGString(&spRW[li%2], c[li%2][li/2])))
 					}),
 				)
 			}),
