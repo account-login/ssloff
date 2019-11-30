@@ -53,6 +53,7 @@ func (r *Remote) localInitializer(ctx context.Context, conn net.Conn) {
 
 	// create peerState
 	p := newPeer()
+	p.pmetric.Peer = conn.RemoteAddr().String()
 	p.conn = conn
 	p.onConnect = func(ctx context.Context, cid uint32, cmd uint32, addr socksAddr, port uint16) {
 		// create leaf synchronously

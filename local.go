@@ -139,7 +139,8 @@ func (l *Local) clientInitializer(ctx context.Context, conn net.Conn) {
 	client.metric.Id = client.id
 	client.metric.Leaf = socksAddrString(dstAddr, dstPort)
 	client.metric.Self = conn.RemoteAddr().String()
-	atomic.StoreInt64(&client.metric.Created, acceptedUs)
+	client.metric.Created = acceptedUs
+	atomic.StoreInt64(&client.metric.Connected, acceptedUs)
 
 	// connect cmd
 	var cmd uint32 = kCmdConnect
