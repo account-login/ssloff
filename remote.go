@@ -115,7 +115,7 @@ func doConnect(remote *Remote, l *leafState,
 
 	// metric
 	l.metric.Id = l.id
-	l.metric.Leaf = addr
+	l.metric.Target = addr
 	l.metric.Created = time.Now().UnixNano() / 1000
 
 	// dial
@@ -129,7 +129,7 @@ func doConnect(remote *Remote, l *leafState,
 	defer safeClose(ctx, conn) // NOTE: will closing the net.Conn, not tls.Conn
 
 	// metric
-	l.metric.Self = conn.LocalAddr().String()
+	l.metric.From = conn.LocalAddr().String()
 	atomic.StoreInt64(&l.metric.Connected, time.Now().UnixNano()/1000)
 
 	// tls

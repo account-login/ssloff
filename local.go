@@ -137,8 +137,8 @@ func (l *Local) clientInitializer(ctx context.Context, conn net.Conn) {
 		client.conn = conn
 	}
 	client.metric.Id = client.id
-	client.metric.Leaf = socksAddrString(dstAddr, dstPort)
-	client.metric.Self = conn.RemoteAddr().String()
+	client.metric.Target = socksAddrString(dstAddr, dstPort)
+	client.metric.From = conn.RemoteAddr().String()
 	client.metric.Created = acceptedUs
 	atomic.StoreInt64(&client.metric.Connected, acceptedUs)
 
@@ -210,6 +210,8 @@ func (l *Local) remoteConnector(ctx context.Context) {
 		ctxlog.Warnf(ctx, "reconnecting after 1s")
 		time.Sleep(1 * time.Second)
 	}
+
+	// TODO: shutdown mechanism
 }
 
 func (l *Local) remoteInitializer(ctx context.Context) {
@@ -243,8 +245,8 @@ func (l *Local) remoteInitializer(ctx context.Context) {
 	<-p.readerDone
 	<-p.writerDone
 
-	// dbg server
-	dbgServerDelPeer(uintptr(unsafe.Pointer(l)))
+	// NOTE: do not remove dbgPeer here
+	//dbgServerDelPeer(uintptr(unsafe.Pointer(l)))
 
 	// clear remote state
 	l.pstate.Store((*peerState)(nil))

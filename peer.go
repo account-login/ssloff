@@ -43,8 +43,8 @@ type peerState struct {
 
 type leafMetric struct {
 	Id           uint32
-	Leaf         string // FIXME: rename
-	Self         string // FIXME: rename
+	Target       string
+	From         string
 	Created      int64
 	Connected    int64 // NOTE: sync
 	FirstWrite   int64
@@ -539,8 +539,8 @@ func (p *peerState) getMetric() (pm peerMetric) {
 
 		lm := leafMetric{}
 		lm.Id = l.metric.Id
-		lm.Leaf = l.metric.Leaf
-		lm.Self = l.metric.Self
+		lm.Target = l.metric.Target
+		lm.From = l.metric.From
 		lm.Created = l.metric.Created
 		lm.Connected = l.metric.Connected
 		lm.BytesRead = atomic.LoadInt64(&l.metric.BytesRead)

@@ -33,8 +33,8 @@ type lineData struct {
 }
 
 type leafData struct {
-	leaf         string
-	self         string
+	target       string
+	from         string
 	bytesRead    lineData
 	bytesWritten lineData
 	skip         int
@@ -99,7 +99,7 @@ var kUnits = []string{
 func makeYTicks(max int64) (ticks []int64, labels []string) {
 	f := float64(max)
 	mag := int64(1)
-	for f >= 17 {
+	for f > 40 {
 		f /= 10
 		mag *= 10
 	}
@@ -186,15 +186,15 @@ func makeSVG(sp *svgParam, data []int64, writer io.Writer) {
 		factor++
 	}
 	for i, tval := range ticks {
+		if i%factor != factor-1 {
+			continue // avoid overlapping ticks
+		}
+
 		y := int((1 - float64(tval)/float64(upperVal)) * float64(sp.h))
 		if y <= 0 {
 			y = 1
 		} else if y >= sp.h {
 			y = sp.h - 1
-		}
-
-		if i%factor != 0 {
-			continue // avoid overlapping ticks
 		}
 
 		fmt.Fprintf(writer, `<line x1="0" y1="%d" x2="%d" y2="%d" stroke="black" stroke-width="1" stroke-opacity="0.5"/>`,
@@ -216,7 +216,9 @@ func dbgServerAddPeer(key uintptr, p *peerState) {
 	if _, ok := globalDbgServer.peerMap[key]; !ok {
 		globalDbgServer.peerMap[key] = &debugPeer{leafMap: map[uint32]*leafData{}}
 	}
+	globalDbgServer.peerMap[key].mu.Lock()
 	globalDbgServer.peerMap[key].peer = p
+	globalDbgServer.peerMap[key].mu.Unlock()
 }
 
 func dbgServerDelPeer(key uintptr) {
@@ -226,15 +228,15 @@ func dbgServerDelPeer(key uintptr) {
 }
 
 func collectMetric(dp *debugPeer) {
+	dp.mu.Lock()
+	defer dp.mu.Unlock()
+
 	curMetric := dp.peer.getMetric()
 	if dp.peer != dp.lastPeer {
 		// reset metric
 		dp.lastMetric = peerMetric{}
 		dp.leafMap = map[uint32]*leafData{}
 	}
-
-	dp.mu.Lock()
-	defer dp.mu.Unlock()
 
 	// peer metric
 	dp.peerBytesRead.add(curMetric.BytesRead - dp.lastMetric.BytesRead)
@@ -244,7 +246,7 @@ func collectMetric(dp *debugPeer) {
 	for _, cur := range curMetric.Leaves {
 		// dest
 		if dp.leafMap[cur.Id] == nil {
-			dp.leafMap[cur.Id] = &leafData{leaf: cur.Leaf, self: cur.Self}
+			dp.leafMap[cur.Id] = &leafData{target: cur.Target, from: cur.From}
 		}
 		ld := dp.leafMap[cur.Id]
 		// last
@@ -323,7 +325,7 @@ func dbgPage(w http.ResponseWriter, r *http.Request) {
 		var iLeafLabels []string
 		for lid, ld := range dp.leafMap {
 			iLeafIds = append(iLeafIds, lid)
-			label := ld.self + " -> " + ld.leaf
+			label := ld.from + " -> " + ld.target
 			if ld.skip > 0 {
 				label = "[dead] " + label
 			}
