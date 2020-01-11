@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"gopkg.in/account-login/ctxlog.v2"
+	"io"
 	"net"
 	"sync/atomic"
 	"time"
@@ -56,6 +57,55 @@ func (l *Local) clientAcceptor(ctx context.Context, listener net.Listener) {
 	}
 }
 
+func unwrapTLS(
+// in
+	ctx context.Context, mitm *MITM, peekData []byte, conn net.Conn,
+	dstAddr socksAddr, dstPort uint16) (
+// out
+	[]byte, net.Conn, socksAddr, uint16, error) {
+	// body
+
+	// can not unwrap
+	if mitm == nil || dstPort != 443 {
+		return peekData, conn, dstAddr, dstPort, nil
+	}
+
+	// read more data
+	if len(peekData) == 0 {
+		peekData = make([]byte, kReaderBuf)
+		n, err := conn.Read(peekData) // FIXME: io timeout
+		if err != nil && err != io.EOF {
+			ctxlog.Errorf(ctx, "peek for ssl handshake: %v", err)
+			return peekData, conn, dstAddr, dstPort, err
+		}
+
+		peekData = peekData[:n]
+	}
+
+	if host, ok := detectTLS(peekData); ok {
+		// setup peekedConn
+		if host == "" {
+			host = dstAddr.String()
+			ctxlog.Infof(ctx, "got tls without SNI [host:%v]", host)
+		} else {
+			ctxlog.Infof(ctx, "got tls SNI [host:%v]", host)
+		}
+		bottom := peekedConn{peeked: peekData, conn: conn}
+		peekData = nil
+		// create tls conn
+		conn = tls.Server(&bottom, mitm.TLSForHost(ctx, host))
+		// fix dstAddr to domain name if tls host is domain name
+		if dstAddr.atype != kSocksAddrDomain {
+			if net.ParseIP(host) == nil {
+				ctxlog.Infof(ctx, "fix [dst:%v] to [host:%v]", dstAddr, host)
+				dstAddr = socksAddr{atype: kSocksAddrDomain, addr: []byte(host)}
+			}
+		}
+	}
+
+	return peekData, conn, dstAddr, dstPort, nil
+}
+
 func (l *Local) clientInitializer(ctx context.Context, conn net.Conn) {
 	defer safeClose(ctx, conn)
 
@@ -80,43 +130,18 @@ func (l *Local) clientInitializer(ctx context.Context, conn net.Conn) {
 	}
 
 	// detect ssl
-	var tlsConn *tls.Conn
 	// consume buffered data
-	peekData := make([]byte, reader.Buffered())
-	_, _ = reader.Read(peekData)
-	if l.MITM != nil && dstPort == 443 {
-		// read more data
-		if len(peekData) == 0 {
-			peekData = make([]byte, kReaderBuf)
-			n, err := conn.Read(peekData)
-			if err != nil {
-				ctxlog.Errorf(ctx, "peek for ssl handshake: %v", err)
-				return
-			}
+	peekData, err := reader.Peek(reader.Buffered())
+	if err != nil {
+		ctxlog.Errorf(ctx, "peek for ssl handshake: %v", err)
+		return
+	}
+	reader = nil
 
-			peekData = peekData[:n]
-		}
-
-		if host, ok := detectTLS(peekData); ok {
-			// setup peekedConn
-			if host == "" {
-				host = dstAddr.String()
-				ctxlog.Infof(ctx, "got tls without SNI [host:%v]", host)
-			} else {
-				ctxlog.Infof(ctx, "got tls SNI [host:%v]", host)
-			}
-			bottom := peekedConn{peeked: peekData, conn: conn}
-			peekData = nil
-			// create tls conn
-			tlsConn = tls.Server(&bottom, l.MITM.TLSForHost(ctx, host))
-			// fix dstAddr to domain name if tls host is domain name
-			if dstAddr.atype != kSocksAddrDomain {
-				if net.ParseIP(host) == nil {
-					ctxlog.Infof(ctx, "fix [dst:%v] to [host:%v]", dstAddr, host)
-					dstAddr = socksAddr{atype: kSocksAddrDomain, addr: []byte(host)}
-				}
-			}
-		}
+	peekData, conn, dstAddr, dstPort, err =
+		unwrapTLS(ctx, l.MITM, peekData, conn, dstAddr, dstPort)
+	if err != nil {
+		return
 	}
 
 	// create client
@@ -131,11 +156,7 @@ func (l *Local) clientInitializer(ctx context.Context, conn net.Conn) {
 	ctxlog.Debugf(ctx, "created client")
 
 	// setup client
-	if tlsConn != nil {
-		client.conn = tlsConn
-	} else {
-		client.conn = conn
-	}
+	client.conn = conn
 	client.metric.Id = client.id
 	client.metric.Target = socksAddrString(dstAddr, dstPort)
 	client.metric.From = conn.RemoteAddr().String()
@@ -144,7 +165,7 @@ func (l *Local) clientInitializer(ctx context.Context, conn net.Conn) {
 
 	// connect cmd
 	var cmd uint32 = kCmdConnect
-	if tlsConn != nil {
+	if _, ok := conn.(*tls.Conn); ok {
 		cmd = kCmdConnectSSL
 	}
 	client.peerWriterInput(ctx, &protoMsg{
