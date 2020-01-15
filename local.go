@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"github.com/pkg/errors"
 	"gopkg.in/account-login/ctxlog.v2"
 	"io"
 	"net"
@@ -106,6 +107,36 @@ func unwrapTLS(
 	return peekData, conn, dstAddr, dstPort, nil
 }
 
+func handshake(
+// in
+	ctx context.Context, conn net.Conn) (
+// out
+	dstAddr socksAddr, dstPort uint16, peekData []byte, err error) {
+	// body
+	reader := bufio.NewReaderSize(conn, kReaderBuf)
+
+	b, err := reader.ReadByte()
+	if err != nil {
+		err = errors.Wrap(err, "read handshake")
+		return
+	}
+	err = reader.UnreadByte()
+	if err != nil {
+		panic(err)
+	}
+
+	if b == 5 || b == 4 {
+		dstAddr, dstPort, err = socks5handshake(readerWriter{reader, conn})
+		if err != nil {
+			return
+		}
+		peekData = bufioReaderRemains(reader)
+		return
+	} else {
+		return httpProxyHandshake(ctx, reader, conn)
+	}
+}
+
 func (l *Local) clientInitializer(ctx context.Context, conn net.Conn) {
 	defer safeClose(ctx, conn)
 
@@ -119,25 +150,16 @@ func (l *Local) clientInitializer(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	// read socks5 req
+	// read socks5 req or http req
 	// TODO: io deadline
-	// TODO: http proxy
-	reader := bufio.NewReaderSize(conn, kReaderBuf)
-	dstAddr, dstPort, err := socks5handshake(readerWriter{reader, conn})
+	// TODO: sni proxy
+	dstAddr, dstPort, peekData, err := handshake(ctx, conn)
 	if err != nil {
 		ctxlog.Errorf(ctx, "%v", err)
 		return
 	}
 
 	// detect ssl
-	// consume buffered data
-	peekData, err := reader.Peek(reader.Buffered())
-	if err != nil {
-		ctxlog.Errorf(ctx, "peek for ssl handshake: %v", err)
-		return
-	}
-	reader = nil
-
 	peekData, conn, dstAddr, dstPort, err =
 		unwrapTLS(ctx, l.MITM, peekData, conn, dstAddr, dstPort)
 	if err != nil {

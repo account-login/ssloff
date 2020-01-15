@@ -1,6 +1,12 @@
 package ssloff
 
-import _ "net/http/pprof"
+import (
+	"bufio"
+	"github.com/pkg/errors"
+	"net"
+	_ "net/http/pprof"
+	"strconv"
+)
 import (
 	"context"
 	"gopkg.in/account-login/ctxlog.v2"
@@ -53,6 +59,31 @@ func reader2chan(reader io.Reader) (result chan interface{}, quit chan struct{})
 	}()
 
 	return
+}
+
+func SplitHostPort(hostPort string) (host string, port uint16, err error) {
+	var portStr string
+	var portInt uint64
+	host, portStr, err = net.SplitHostPort(hostPort)
+	if err != nil {
+		return
+	}
+
+	portInt, err = strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		err = errors.Wrapf(err, "SplitHostPort: can not parse port: %q", portStr)
+		return
+	}
+	port = uint16(portInt)
+	return
+}
+
+func bufioReaderRemains(reader *bufio.Reader) []byte {
+	peekData, err := reader.Peek(reader.Buffered())
+	if err != nil {
+		panic(err)
+	}
+	return peekData
 }
 
 func StartDebugServer(ctx context.Context, addr string) (server *http.Server) {
