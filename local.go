@@ -15,10 +15,11 @@ import (
 
 type Local struct {
 	// params
-	RemoteAddr  string
-	LocalAddr   string
-	DialTimeout float64
-	MITM        *MITM
+	RemoteAddr       string
+	LocalAddr        string
+	DialTimeout      float64
+	HandshakeTimeout float64
+	MITM             *MITM
 	// *peerState
 	pstate atomic.Value
 }
@@ -74,10 +75,16 @@ func unwrapTLS(
 	// read more data
 	if len(peekData) == 0 {
 		peekData = make([]byte, kReaderBuf)
-		n, err := conn.Read(peekData) // FIXME: io timeout
-		if err != nil && err != io.EOF {
-			ctxlog.Errorf(ctx, "peek for ssl handshake: %v", err)
-			return peekData, conn, dstAddr, dstPort, err
+		n, err := conn.Read(peekData)
+		if err != nil {
+			if neterr, ok := err.(net.Error); ok && neterr.Timeout() {
+				ctxlog.Infof(ctx, "unwrapTLS peek timeout")
+				return peekData, conn, dstAddr, dstPort, nil
+			}
+			if err != io.EOF {
+				ctxlog.Errorf(ctx, "peek for ssl handshake: %v", err)
+				return peekData, conn, dstAddr, dstPort, err
+			}
 		}
 
 		peekData = peekData[:n]
@@ -150,8 +157,9 @@ func (l *Local) clientInitializer(ctx context.Context, conn net.Conn) {
 		return
 	}
 
+	// set timeout before handshake
+	_ = conn.SetReadDeadline(time.Now().Add(time.Duration(l.HandshakeTimeout * float64(time.Second))))
 	// read socks5 req or http req
-	// TODO: io deadline
 	// TODO: sni proxy
 	dstAddr, dstPort, peekData, err := handshake(ctx, conn)
 	if err != nil {
@@ -160,11 +168,15 @@ func (l *Local) clientInitializer(ctx context.Context, conn net.Conn) {
 	}
 
 	// detect ssl
+	_ = conn.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
 	peekData, conn, dstAddr, dstPort, err =
 		unwrapTLS(ctx, l.MITM, peekData, conn, dstAddr, dstPort)
 	if err != nil {
 		return
 	}
+
+	// reset read timeout
+	_ = conn.SetReadDeadline(time.Time{})
 
 	// create client
 	client := createClient(ctx, p)
