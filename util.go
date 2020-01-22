@@ -2,16 +2,14 @@ package ssloff
 
 import (
 	"bufio"
-	"github.com/pkg/errors"
-	"net"
-	_ "net/http/pprof"
-	"strconv"
-)
-import (
 	"context"
+	"github.com/pkg/errors"
 	"gopkg.in/account-login/ctxlog.v2"
 	"io"
+	"net"
 	"net/http"
+	_ "net/http/pprof"
+	"strconv"
 )
 
 type readerWriter struct {
